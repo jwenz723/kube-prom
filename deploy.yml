@@ -2,11 +2,12 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: prommon
-# ---
+---
 # apiVersion: v1
 # kind: PersistentVolume
 # metadata:
-#   name: prometheus-volume
+#   name: prometheus-persistent-volume
+#   namespace: prommon
 #   labels:
 #     type: local
 # spec:
@@ -16,25 +17,98 @@ metadata:
 #   accessModes:
 #     - ReadWriteOnce
 #   hostPath:
-#     path: "/mnt/data"
+#     path: "/tmp/prometheus"
 # ---
 # apiVersion: v1
 # kind: PersistentVolumeClaim
 # metadata:
-#   name: prometheus-volume-claim
+#   name: prometheus-persistent-volume-claim
+#   namespace: prommon
 # spec:
 #   storageClassName: manual
 #   accessModes:
 #     - ReadWriteOnce
 #   resources:
 #     requests:
-#       storage: 3Gi
+#       storage: 10Gi
+---
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: prometheus-pv-volume
+  namespace: prommon
+  labels:
+    type: local
+    app: prometheus
+  annotations:
+    pv.beta.kubernetes.io/gid: "2000"
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    # The directory /mnt/prometheus must exist before creating this PersistentVolume and it needs to have proper write access (like 777)
+    path: "/mnt/prometheus"
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: prometheus-pv-claim
+  namespace: prommon
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 3Gi
+  selector:
+    matchLabels:
+      app: "prometheus"
+---
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: grafana-pv-volume
+  namespace: prommon
+  labels:
+    type: local
+    app: grafana
+  annotations:
+    pv.beta.kubernetes.io/gid: "472"
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    # The directory /mnt/grafana must exist before creating this PersistentVolume and it needs to have proper write access (like 777)
+    path: "/mnt/grafana"
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: grafana-pv-claim
+  namespace: prommon
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 3Gi
+  selector:
+    matchLabels:
+      app: "grafana"
 ---
 apiVersion: v1
 data:
   prometheus.yml: |
     global:
-      scrape_interval: 10s
+      scrape_interval: 1s
     scrape_configs:
       # https://github.com/prometheus/prometheus/blob/master/documentation/examples/prometheus-kubernetes.yml#L37
       - job_name: 'kubernetes-nodes'
@@ -51,12 +125,59 @@ data:
           - source_labels: [instance]
             action: replace
             target_label: node_name
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+
+      - job_name: 'kubernetes-cadvisor'
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - source_labels: [__address__]
+            regex: '(.*):10250'
+            replacement: '${1}:10255'
+            target_label: __address__
+          - source_labels: [instance]
+            action: replace
+            target_label: node_name
+          - target_label: __metrics_path__
+            replacement: /metrics/cadvisor
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
 
       # https://github.com/prometheus/prometheus/blob/master/documentation/examples/prometheus-kubernetes.yml#L79
-      - job_name: 'kubernetes-endpoints'
+      # - job_name: 'kubernetes-endpoints'
+      #   kubernetes_sd_configs:
+      #     - role: endpoints
+      #   relabel_configs:
+      #     - action: labelmap
+      #       regex: __meta_kubernetes_pod_label_(.+)
+      #     - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+      #       action: keep
+      #       regex: true
+      #     - source_labels: [__meta_kubernetes_pod_name]
+      #       regex: (.*)
+      #       action: replace
+      #       target_label: pod_name
+      #     - source_labels: [__meta_kubernetes_pod_node_name]
+      #       regex: (.*)
+      #       action: replace
+      #       target_label: node_name
+      #     - regex: 'controller_revision_hash|pod_template_generation|pod_template_hash'
+      #       action: labeldrop
+
+      - job_name: 'prometheus'
         kubernetes_sd_configs:
           - role: endpoints
         relabel_configs:
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: 'prometheus'
+            action: keep
           - action: labelmap
             regex: __meta_kubernetes_pod_label_(.+)
           - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
@@ -81,9 +202,49 @@ data:
             action: keep
             regex: true
           - source_labels: [__meta_kubernetes_pod_label_app]
-            regex: 'node_exporter'
+            regex: 'node-exporter'
             action: keep
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_name]
+            regex: (.*)
+            action: replace
+            target_label: pod_name
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            regex: (.*)
+            action: replace
+            target_label: node_name
+          - regex: 'controller_revision_hash|pod_template_generation|pod_template_hash'
+            action: labeldrop
 
+      - job_name: 'node-test'
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: 'node-exporter-test'
+            action: keep
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_name]
+            regex: (.*)
+            action: replace
+            target_label: pod_name
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            regex: (.*)
+            action: replace
+            target_label: node_name
+          - regex: 'controller_revision_hash|pod_template_generation|pod_template_hash'
+            action: labeldrop
 kind: ConfigMap
 metadata:
   creationTimestamp: null
@@ -93,7 +254,7 @@ metadata:
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
-  name: prometheus-deploy
+  name: prometheus
   namespace: prommon
 spec:
   replicas: 1
@@ -108,6 +269,8 @@ spec:
       labels:
         app: prometheus
     spec:
+      securityContext:
+        runAsUser: 0
       serviceAccountName: prometheus-k8s
       containers:
         - name: prometheus
@@ -120,16 +283,29 @@ spec:
             - name: webui
               containerPort: 9090
           volumeMounts:
-            - name: prometheus-data
-              mountPath: /prometheus
+            # - name: prometheus-data
+            #   mountPath: /prometheus
             - name: config-volume
               mountPath: /etc/prometheus
+            - name: prometheus-pv-storage
+              mountPath: /prometheus
+
       volumes:
-        - name: prometheus-data
-          emptyDir: {}
+        # - name: prometheus-data
+        #   emptyDir: {}
         - name: config-volume
           configMap:
             name: prometheus-config
+        - name: prometheus-pv-storage
+          persistentVolumeClaim:
+           claimName: prometheus-pv-claim
+        # - name: prometheus-data
+        #   hostPath:
+        #     path: /tmp/prometheus
+        #     type: DirectoryOrCreate
+        # - name: prometheus-data
+        #   persistentVolumeClaim:
+        #     claimName: prometheus-persistent-volume-claim
 ---
 apiVersion: extensions/v1beta1
 kind: Deployment
@@ -256,6 +432,29 @@ spec:
       hostNetwork: true
       hostPID: true
 ---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: node-exporter-test
+  namespace: prommon
+  labels:
+    app: node-exporter-test
+spec:
+  replicas: 1
+  template:
+    metadata:
+      name: node-exporter-test
+      labels:
+        app: node-exporter-test
+    spec:
+      containers:
+      - image: prom/node-exporter:latest
+        name: node-exporter-test
+        ports:
+        - name: prom-node-exp
+          #^ must be an IANA_SVC_NAME (at most 15 characters, ..)
+          containerPort: 9100
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -274,3 +473,70 @@ spec:
   selector:
     app: node-exporter
   type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    prometheus.io/scrape: 'true'
+  name: node-exporter-test
+  namespace: prommon
+  labels:
+    app: node-exporter-test
+spec:
+  clusterIP: None
+  ports:
+    - name: node-exporter-test
+      port: 9100
+      protocol: TCP
+  selector:
+    app: node-exporter-test
+  type: ClusterIP
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: prommon
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  template:
+    metadata:
+      name: grafana
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        runAsUser: 0
+      containers:
+      - image: grafana/grafana:latest
+        name: grafana
+        ports:
+        - name: grafana
+          containerPort: 3000
+        volumeMounts:
+            - name: grafana-pv-storage
+              mountPath: /var/lib/grafana
+      volumes:
+        - name: grafana-pv-storage
+          persistentVolumeClaim:
+           claimName: grafana-pv-claim
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: prommon
+  labels:
+    app: grafana
+spec:
+  ports:
+    - name: grafana
+      port: 3000
+      nodePort: 32000
+      protocol: TCP
+  selector:
+    app: grafana
+  type: NodePort
